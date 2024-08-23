@@ -1,34 +1,33 @@
-use crate::crypto::keys::{PublicKey, SignatureWrapper};
-use crate::types::hash;
+use crate::{
+    crypto::keys::{PublicKey, SignatureWrapper},
+    types::hashing::hasher::{self, Hasher},
+};
 
-use crypto::digest::Digest;
 use serde::{Deserialize, Serialize};
-use crypto::sha2::Sha256;
-
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
-pub struct Transaction {
+pub struct Transaction<H: hasher::Hasher> {
     pub from: Option<PublicKey>,
     pub to: Option<PublicKey>,
     pub value: u64,
     pub data: Vec<u8>,
     pub signature: Option<SignatureWrapper>,
-    pub nonce: u64,
+    pub nonce: u64, // What are we want to achieve with tx nonce?
 
     // Cached version of the transaction hash
-    pub hash: Option<hash::Hash>,
+    pub hash: Option<H::Out>,
 }
 
-impl Transaction {
+impl<H: Hasher> Transaction<H> {
     pub fn new(data: Vec<u8>) -> Self {
         Transaction {
-            from: None,
-            to: None,
-            value: 0,
             data,
-            signature: None,
             nonce: rand::random::<u64>(),
-            hash: None,
+            from: Default::default(),
+            to: Default::default(),
+            value: Default::default(),
+            signature: Default::default(),
+            hash: Default::default(),
         }
     }
 
@@ -37,18 +36,13 @@ impl Transaction {
     }
 
     /// Calculate the hash of the transaction
-    pub fn hash(&self) -> Option<hash::Hash> {
+    pub fn hash(&self) -> Option<H::Out> {
         if let Some(hash) = &self.hash {
             return Some(hash.clone());
         }
 
         let bytes = self.to_bytes();
-        let mut hasher = Sha256::new();
-        hasher.input(&bytes);
-        let mut hash = [0; 32];
-        hasher.result(&mut hash);
-
-        Some(hash::Hash { hash })
+        Some(H::hash(&bytes))
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -56,6 +50,6 @@ impl Transaction {
     }
 
     pub fn decode(data: &[u8]) -> Self {
-        bincode::deserialize::<Transaction>(data).unwrap()
+        bincode::deserialize::<Transaction<H>>(data).unwrap()
     }
 }

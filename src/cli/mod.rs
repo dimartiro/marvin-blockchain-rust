@@ -1,4 +1,4 @@
-use clap::{arg, Arg, Command};
+use clap::{Arg, Command};
 
 pub fn start_cli() -> Command {
     Command::new("marvinctl")

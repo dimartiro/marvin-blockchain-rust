@@ -1,36 +1,20 @@
-use crate::core::transaction::Transaction;
-use crate::crypto::keys::{PrivateKey, PublicKey, SignatureWrapper};
-use crate::types::hash;
+use crate::{
+    crypto::keys::{PrivateKey, PublicKey, SignatureWrapper},
+    types::hashing::{hasher::Hasher, sha256::SHA256Hash},
+};
+
+use super::header::Header;
+use super::transaction::Transaction;
+use crate::types::hashing::sha256::SHA256;
 
 use bincode;
-use crypto::digest::Digest;
 use serde::{Deserialize, Serialize};
 
-use crypto::sha2::Sha256;
-
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Header {
-    pub previous_block_hash: [u8; 32],
+pub struct Block<H: Hasher> {
+    header: Header<H>,
+    transactions: Vec<Transaction<H>>,
 
-    pub tx_hash: hash::Hash,
-    pub version: u32,
-    pub height: u32,
-    pub timestamp: u32,
-
-    pub nonce: u32,
-    pub difficulty: u8,
-}
-
-impl Header {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Serialization failed")
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Block {
-    header: Header,
-    transactions: Vec<Transaction>,
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
     public_key: Option<PublicKey>,
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
@@ -38,11 +22,14 @@ pub struct Block {
 
     // Cached version of the header hash
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
-    hash: Option<hash::Hash>,
+    hash: Option<H::Out>,
 }
 
-impl Block {
-    pub fn new(header: Header, transactions: Vec<Transaction>) -> Self {
+impl<H> Block<H>
+where
+    H: Hasher + Serialize + for<'a> Deserialize<'a>,
+{
+    pub fn new(header: Header<H>, transactions: Vec<Transaction<H>>) -> Self {
         Block {
             header,
             transactions,
@@ -52,34 +39,22 @@ impl Block {
         }
     }
 
-    /// Serialize the block to bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Serialization failed")
-    }
-
-
     /// Add a transaction to the block
-    pub fn add_transaction(&mut self, transaction: Transaction) {
+    pub fn add_transaction(&mut self, transaction: Transaction<H>) {
         self.transactions.push(transaction);
-        let mut txHash = self.calculate_tx_hash();
-        self.header.tx_hash = txHash;
+        self.header.tx_hash = self.calculate_tx_hash();
     }
-
 
     /// Calculates the hash of all the transactions in the block
-    pub fn calculate_tx_hash(&self) -> hash::Hash {
-        let mut hasher = Sha256::new();
+    pub fn calculate_tx_hash(&self) -> H::Out {
+        let mut tx_data: Vec<u8> = Vec::new();
 
         for tx in &self.transactions {
-            hasher.input(&tx.to_bytes());
+            tx_data.extend_from_slice(&tx.to_bytes());
         }
 
-        let mut hash = [0; 32];
-        hasher.result(&mut hash);
-
-        hash::Hash { hash }
+        H::hash(&tx_data)
     }
-
 
     /// Sign the block with the given private key
     pub fn sign(&mut self, mut private_key: PrivateKey) -> Result<(), String> {
@@ -106,8 +81,7 @@ impl Block {
             return Err("Invalid signature".to_string());
         }
 
-        let mut tx_hash = self.calculate_tx_hash();
-        if tx_hash != self.header.tx_hash {
+        if self.calculate_tx_hash() != self.header.tx_hash {
             return Err("Invalid transaction hash".to_string());
         }
 
@@ -115,18 +89,12 @@ impl Block {
     }
 
     /// Calculate the hash of the block
-    pub fn hash(&self) -> Option<hash::Hash> {
+    pub fn hash(&self) -> Option<H::Out> {
         if let Some(hash) = &self.hash {
             return Some(hash.clone());
         }
 
-        let bytes = self.to_bytes();
-        let mut hasher = Sha256::new();
-        hasher.input(&bytes);
-        let mut hash = [0; 32];
-        hasher.result(&mut hash);
-
-        Some(hash::Hash { hash })
+        Some(H::hash(&self.header.to_bytes()))
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -134,18 +102,17 @@ impl Block {
     }
 
     pub fn decode(data: &[u8]) -> Self {
-        bincode::deserialize::<Block>(data).unwrap()
+        bincode::deserialize::<Block<H>>(data).unwrap()
     }
-
 }
 
 /// Generate a random block for testing purposes
-fn generate_random_block() -> Block {
-    let mut private_key = crate::crypto::keys::generate_private_key();
+fn generate_random_block() -> Block<SHA256> {
+    let private_key = crate::crypto::keys::generate_private_key();
 
-    let mut header = Header {
-        previous_block_hash: [0; 32],
-        tx_hash: hash::Hash { hash: [0; 32] },
+    let header = Header {
+        previous_block_hash: SHA256Hash::default(),
+        tx_hash: SHA256Hash::default(),
         version: 1,
         height: 1,
         timestamp: 1,
@@ -172,9 +139,12 @@ mod tests {
     fn test_block_encode_decode() {
         let block = generate_random_block();
         let encoded = block.encode();
-        let decoded = Block::decode(&encoded);
+        let decoded: Block<SHA256> = Block::decode(&encoded);
 
-        assert_eq!(block.header.previous_block_hash, decoded.header.previous_block_hash);
+        assert_eq!(
+            block.header.previous_block_hash,
+            decoded.header.previous_block_hash
+        );
         assert_eq!(block.header.tx_hash, decoded.header.tx_hash);
         assert_eq!(block.header.version, decoded.header.version);
         assert_eq!(block.header.height, decoded.header.height);
@@ -210,14 +180,14 @@ mod tests {
     fn test_block_hash() {
         let block = generate_random_block();
         let hash = block.hash().unwrap();
-        assert!(!hash.is_zero());
+        assert!(!hash.is_empty());
     }
 
     #[test]
     fn test_block_new() {
-        let header = Header {
-            previous_block_hash: [0; 32],
-            tx_hash: hash::Hash { hash: [0; 32] },
+        let header: Header<SHA256> = Header {
+            previous_block_hash: SHA256Hash::default(),
+            tx_hash: SHA256Hash::default(),
             version: 1,
             height: 1,
             timestamp: 1,
@@ -228,8 +198,8 @@ mod tests {
         let transactions = vec![];
         let block = Block::new(header, transactions);
 
-        assert_eq!(block.header.previous_block_hash, [0; 32]);
-        assert_eq!(block.header.tx_hash.hash, [0; 32]);
+        assert_eq!(block.header.previous_block_hash, SHA256Hash::default());
+        assert_eq!(block.header.tx_hash, SHA256Hash::default());
         assert_eq!(block.header.version, 1);
         assert_eq!(block.header.height, 1);
         assert_eq!(block.header.timestamp, 1);
@@ -240,9 +210,9 @@ mod tests {
 
     #[test]
     fn test_header_serialization() {
-        let header = Header {
-            previous_block_hash: [0; 32],
-            tx_hash: hash::Hash { hash: [0; 32] },
+        let header: Header<SHA256> = Header {
+            previous_block_hash: SHA256Hash::default(),
+            tx_hash: SHA256Hash::default(),
             version: 1,
             height: 1,
             timestamp: 1,
@@ -251,7 +221,7 @@ mod tests {
         };
 
         let bytes = header.to_bytes();
-        let deserialized_header: Header =
+        let deserialized_header: Header<SHA256> =
             bincode::deserialize(&bytes).expect("Deserialization failed");
 
         assert_eq!(
